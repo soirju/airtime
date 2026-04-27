@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import com.airtime.app.R
 import com.airtime.app.audio.EcapaModel
 import com.airtime.app.audio.SpeakerIdentifier
+import com.airtime.app.audio.WavDecoder
 import com.airtime.app.db.SpeakerDb
 import com.airtime.app.ui.MainActivity
 
@@ -26,6 +27,7 @@ class ListeningService : Service() {
         const val NOTIFICATION_ID = 1
         const val SAMPLE_RATE = 16000
         const val CHUNK_SECONDS = 2
+        const val EXTRA_AUDIO_FILE = "audio_file"
 
         var identifier: SpeakerIdentifier? = null
             private set
@@ -62,7 +64,13 @@ class ListeningService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         isRunning = true
-        startRecording()
+
+        val audioFile = intent?.getStringExtra(EXTRA_AUDIO_FILE)
+        if (audioFile != null) {
+            startFilePlayback(audioFile)
+        } else {
+            startRecording()
+        }
         return START_STICKY
     }
 
@@ -72,6 +80,7 @@ class ListeningService : Service() {
         audioRecord?.release()
         recordingThread?.interrupt()
         identifier?.getProfiles()?.forEach { speakerDb.saveSpeaker(it) }
+        speakerDb.close()
         identifier = null
         ecapaModel?.close()
         ecapaModel = null
@@ -101,18 +110,43 @@ class ListeningService : Service() {
             while (!Thread.currentThread().isInterrupted && isRunning) {
                 val read = audioRecord?.read(buffer, 0, chunkSamples) ?: break
                 if (read > 0) {
-                    val chunk = buffer.copyOf(read)
-                    val speakerId = identifier?.identify(chunk) ?: continue
-                    if (speakerId != -1) {
-                        val chunkMs = (read.toLong() * 1000) / SAMPLE_RATE
-                        synchronized(talkTimeMs) {
-                            talkTimeMs[speakerId] = (talkTimeMs[speakerId] ?: 0L) + chunkMs
-                        }
-                        updateNotification()
-                    }
+                    processChunk(buffer.copyOf(read))
                 }
             }
         }.also { it.start() }
+    }
+
+    private fun startFilePlayback(assetPath: String) {
+        val pcm = WavDecoder.decodeFromAssets(this, assetPath, SAMPLE_RATE)
+        if (pcm == null) {
+            stopSelf()
+            return
+        }
+
+        recordingThread = Thread {
+            val chunkSamples = SAMPLE_RATE * CHUNK_SECONDS
+            var offset = 0
+
+            while (offset < pcm.size && !Thread.currentThread().isInterrupted && isRunning) {
+                val end = minOf(offset + chunkSamples, pcm.size)
+                processChunk(pcm.copyOfRange(offset, end))
+                offset = end
+                if (offset < pcm.size) Thread.sleep((CHUNK_SECONDS * 1000).toLong())
+            }
+
+            if (isRunning) stopSelf()
+        }.also { it.start() }
+    }
+
+    private fun processChunk(chunk: ShortArray) {
+        val speakerId = identifier?.identify(chunk) ?: return
+        if (speakerId != -1) {
+            val chunkMs = (chunk.size.toLong() * 1000) / SAMPLE_RATE
+            synchronized(talkTimeMs) {
+                talkTimeMs[speakerId] = (talkTimeMs[speakerId] ?: 0L) + chunkMs
+            }
+            updateNotification()
+        }
     }
 
     private fun updateNotification() {

@@ -15,6 +15,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -22,7 +23,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.airtime.app.db.SpeakerDb
 import com.airtime.app.service.ListeningService
 import kotlinx.coroutines.delay
 
@@ -31,27 +31,37 @@ class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
-        if (results.values.all { it }) startListening()
+        if (results.values.all { it }) startListening(pendingAudioFile)
     }
+
+    private var pendingAudioFile: String? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val testFiles = loadTestAudioFiles()
         setContent {
             MaterialTheme {
                 AirtimeScreen(
-                    onStart = { requestPermissionsAndStart() },
-                    onStop = { stopListening() }
+                    onStart = { audioFile ->
+                        pendingAudioFile = audioFile
+                        requestPermissionsAndStart()
+                    },
+                    onStop = { stopListening() },
+                    testAudioFiles = testFiles
                 )
             }
         }
     }
 
-    override fun onDestroy() {
-        // Persist profiles when activity is destroyed while service may still run
-        ListeningService.identifier?.getProfiles()?.forEach {
-            SpeakerDb(this).saveSpeaker(it)
+    private fun loadTestAudioFiles(): List<String> {
+        return try {
+            assets.list("test-audio")
+                ?.filter { it.endsWith(".wav", ignoreCase = true) }
+                ?.sorted()
+                ?: emptyList()
+        } catch (_: Exception) {
+            emptyList()
         }
-        super.onDestroy()
     }
 
     private fun requestPermissionsAndStart() {
@@ -59,15 +69,19 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            perms.add(Manifest.permission.FOREGROUND_SERVICE_MICROPHONE)
+        }
         val needed = perms.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
         }
-        if (needed.isEmpty()) startListening()
+        if (needed.isEmpty()) startListening(pendingAudioFile)
         else permissionLauncher.launch(needed.toTypedArray())
     }
 
-    private fun startListening() {
+    private fun startListening(audioFile: String?) {
         val intent = Intent(this, ListeningService::class.java)
+        audioFile?.let { intent.putExtra(ListeningService.EXTRA_AUDIO_FILE, "test-audio/$it") }
         ContextCompat.startForegroundService(this, intent)
     }
 
@@ -79,8 +93,9 @@ class MainActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AirtimeScreen(
-    onStart: () -> Unit,
+    onStart: (audioFile: String?) -> Unit,
     onStop: () -> Unit,
+    testAudioFiles: List<String> = emptyList(),
     vm: MainViewModel = viewModel()
 ) {
     // Auto-refresh every second
@@ -91,18 +106,47 @@ fun AirtimeScreen(
         }
     }
 
+    var showFileMenu by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
             TopAppBar(title = { Text("Airtime") })
         },
         floatingActionButton = {
-            FloatingActionButton(
-                onClick = { if (vm.isListening.value) onStop() else onStart() }
-            ) {
-                Icon(
-                    if (vm.isListening.value) Icons.Default.MicOff else Icons.Default.Mic,
-                    contentDescription = if (vm.isListening.value) "Stop listening" else "Start listening"
-                )
+            Column(horizontalAlignment = Alignment.End) {
+                if (testAudioFiles.isNotEmpty() && !vm.isListening.value) {
+                    Box {
+                        FloatingActionButton(
+                            onClick = { showFileMenu = true },
+                            modifier = Modifier.padding(bottom = 12.dp),
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer
+                        ) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = "Play test audio")
+                        }
+                        DropdownMenu(
+                            expanded = showFileMenu,
+                            onDismissRequest = { showFileMenu = false }
+                        ) {
+                            testAudioFiles.forEach { file ->
+                                DropdownMenuItem(
+                                    text = { Text(file) },
+                                    onClick = {
+                                        showFileMenu = false
+                                        onStart(file)
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+                FloatingActionButton(
+                    onClick = { if (vm.isListening.value) onStop() else onStart(null) }
+                ) {
+                    Icon(
+                        if (vm.isListening.value) Icons.Default.MicOff else Icons.Default.Mic,
+                        contentDescription = if (vm.isListening.value) "Stop listening" else "Start listening"
+                    )
+                }
             }
         }
     ) { padding ->
